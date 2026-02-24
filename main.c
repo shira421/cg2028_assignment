@@ -41,7 +41,7 @@ typedef enum {
 
 /* Accelerometer thresholds (m/s^2) */
 #define FREEFALL_THRESHOLD      4.0f
-#define IMPACT_THRESHOLD        19.6f
+#define IMPACT_THRESHOLD        9.75f
 
 /* Gyroscope threshold (degrees per second) */
 #define GYRO_THRESHOLD          120.0f
@@ -52,7 +52,7 @@ typedef enum {
 /* Debounce and timing */
 #define FREEFALL_DEBOUNCE_COUNT    2
 #define FREEFALL_TIMEOUT_MS        500
-#define FALL_ALERT_DURATION_MS     10000
+#define FALL_ALERT_DURATION_MS     3000
 
 /* LED blink rates */
 #define BLINK_FAST_MS              100
@@ -69,6 +69,9 @@ int main(void)
 	/* Reset of all peripherals, Initializes the Flash interface and the Systick. */
 	HAL_Init();
 	initialise_monitor_handles();
+
+	printf("printf \n");
+
 	/* UART initialization  */
 	UART1_Init();
 
@@ -141,10 +144,10 @@ int main(void)
 		accel_filt_asm[2]= (float)mov_avg(N,accel_buff_z) * (9.8/1000.0f);
 
 		/* ---- Filtered accelerometer (C reference) ---- */
-		float accel_filt_c[3]={0};
-		accel_filt_c[0]=(float)mov_avg_C(N,accel_buff_x) * (9.8/1000.0f);
-		accel_filt_c[1]=(float)mov_avg_C(N,accel_buff_y) * (9.8/1000.0f);
-		accel_filt_c[2]=(float)mov_avg_C(N,accel_buff_z) * (9.8/1000.0f);
+//		float accel_filt_c[3]={0};
+//		accel_filt_c[0]=(float)mov_avg_C(N,accel_buff_x) * (9.8/1000.0f);
+//		accel_filt_c[1]=(float)mov_avg_C(N,accel_buff_y) * (9.8/1000.0f);
+//		accel_filt_c[2]=(float)mov_avg_C(N,accel_buff_z) * (9.8/1000.0f);
 
 		/* ---- Compute magnitudes ---- */
 		float accel_mag = sqrtf(
@@ -168,7 +171,7 @@ int main(void)
 		case STATE_NORMAL:
 			led_interval = BLINK_SLOW_MS;
 
-			if (accel_mag < FREEFALL_THRESHOLD)
+			if (accel_mag < FREEFALL_THRESHOLD && gyro_mag > GYRO_THRESHOLD)
 			{
 				freefall_debounce++;
 				if (freefall_debounce >= FREEFALL_DEBOUNCE_COUNT)
@@ -205,7 +208,7 @@ int main(void)
 			break;
 
 		case STATE_IMPACT:
-			if (gyro_mag > GYRO_THRESHOLD)
+			if (gyro_mag < 60 && accel_mag < 12 && accel_mag > 9.6)
 			{
 				state = STATE_FALL_DETECTED;
 				fall_alert_start = now;
@@ -237,52 +240,50 @@ int main(void)
 		if(i>=3)
 		{
 			// C filtered accelerometer
-			printf(buffer, "Results of C execution for filtered accelerometer readings:\r\n");
-			HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
-
-			printf(buffer, "Averaged X : %f; Averaged Y : %f; Averaged Z : %f;\r\n",
-					accel_filt_c[0], accel_filt_c[1], accel_filt_c[2]);
-			HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+//			printf("Results of C execution for filtered accelerometer readings:\r\n");
+//			printf("Averaged X : %f; Averaged Y : %f; Averaged Z : %f;\r\n",
+//					accel_filt_c[0], accel_filt_c[1], accel_filt_c[2]);
+//			HAL_UART_Transmit(&huart1, (uint8_t*)strlen(buffer), HAL_MAX_DELAY);
 
 			// Assembly filtered accelerometer
-			printf(buffer, "Results of assembly execution for filtered accelerometer readings:\r\n");
-			HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
-
-			printf(buffer, "Averaged X : %f; Averaged Y : %f; Averaged Z : %f;\r\n",
-					accel_filt_asm[0], accel_filt_asm[1], accel_filt_asm[2]);
-			HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
-
-			// Gyroscope
-			printf(buffer, "Gyroscope sensor readings:\r\n");
-			HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
-
-			printf(buffer, "Gyro X : %f; Gyro Y : %f; Gyro Z : %f;\r\n",
-					gyro_velocity[0], gyro_velocity[1], gyro_velocity[2]);
-			HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
-
-			// Barometer
-			printf(buffer, "Pressure : %f hPa\r\n", current_pressure);
-			HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
-
-			// Detection status
-			printf(buffer, "Accel Mag: %f m/s^2 | Gyro Mag: %f dps | State: %d",
-					accel_mag, gyro_mag, (int)state);
-			HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+//			printf("Results of assembly execution for filtered accelerometer readings:\r\n");
+////			HAL_UART_Transmit(&huart1, (uint8_t*)strlen(buffer), HAL_MAX_DELAY);
+//
+//			printf("Averaged X : %f; Averaged Y : %f; Averaged Z : %f;\r\n",
+//					accel_filt_asm[0], accel_filt_asm[1], accel_filt_asm[2]);
+////			HAL_UART_Transmit(&huart1, (uint8_t*)strlen(buffer), HAL_MAX_DELAY);
+//
+//			// Gyroscope
+//			printf("Gyroscope sensor readings:\r\n");
+////			HAL_UART_Transmit(&huart1, (uint8_t*)strlen(buffer), HAL_MAX_DELAY);
+//
+//			printf("Gyro X : %f; Gyro Y : %f; Gyro Z : %f;\r\n",
+//					gyro_velocity[0], gyro_velocity[1], gyro_velocity[2]);
+////			HAL_UART_Transmit(&huart1, (uint8_t*)strlen(buffer), HAL_MAX_DELAY);
+//
+//			// Barometer
+//			printf("Pressure : %f hPa\r\n", current_pressure);
+////			HAL_UART_Transmit(&huart1, (uint8_t*)strlen(buffer), HAL_MAX_DELAY);
+//
+//			// Detection status
+			printf("Accel Mag: %f m/s^2 | Gyro Mag: %f dps | State: %d | Pressure: %f \n",
+					accel_mag, gyro_mag, (int)state, current_pressure);
+////			HAL_UART_Transmit(&huart1, (uint8_t*)strlen(buffer), HAL_MAX_DELAY);
 
 			if (state == STATE_FALL_DETECTED)
 			{
-				printf(buffer, " | *** FALL DETECTED! ***");
-				HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+				printf(" | *** FALL DETECTED! ***");
+//				HAL_UART_Transmit(&huart1, (uint8_t*)strlen(buffer), HAL_MAX_DELAY);
 
 				if (pressure_confirmed)
 				{
-					printf(buffer, " [Barometer confirmed]");
-					HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+					printf(" [Barometer confirmed]");
+//					HAL_UART_Transmit(&huart1, (uint8_t*)strlen(buffer), HAL_MAX_DELAY);
 				}
 			}
 
-			printf(buffer, "\r\n\n");
-			HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+//			printf("\r\n\n");
+//			HAL_UART_Transmit(&huart1, (uint8_t*)strlen(buffer), HAL_MAX_DELAY);
 		}
 
 		i++;
@@ -346,4 +347,4 @@ int _fstat(int file, struct stat *st) { return 0; }
 //int _isatty(int file) { return 1; }
 //int _close(int file) { return -1; }
 int _getpid(void) { return 1; }
-//int _kill(int pid, int sig) { return -1; }
+int _kill(int pid, int sig) { return -1; }
