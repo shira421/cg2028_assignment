@@ -1,4 +1,4 @@
-  /******************************************************************************
+/******************************************************************************
   * @file           : main.c
   * @brief          : Main program body
   * (c) CG2028 Teaching Team
@@ -10,9 +10,11 @@
 #include "../../Drivers/BSP/B-L4S5I-IOT01/stm32l4s5i_iot01_accelero.h"
 #include "../../Drivers/BSP/B-L4S5I-IOT01/stm32l4s5i_iot01_tsensor.h"
 #include "../../Drivers/BSP/B-L4S5I-IOT01/stm32l4s5i_iot01_gyro.h"
+#include "../../Drivers/BSP/B-L4S5I-IOT01/stm32l4s5i_iot01_psensor.h"
 
 #include "stdio.h"
 #include "string.h"
+#include <math.h>
 #include <sys/stat.h>
 
 static void UART1_Init(void);
@@ -25,6 +27,40 @@ int mov_avg_C(int N, int* accel_buff); // Reference C implementation
 
 UART_HandleTypeDef huart1;
 
+/*===========================================================================*/
+/*                    FALL DETECTION CONFIGURATION                            */
+/*===========================================================================*/
+
+/* State machine states */
+typedef enum {
+    STATE_NORMAL,           // normal activity, slow LED blink
+    STATE_FREEFALL,         // free-fall detected, waiting for impact
+    STATE_IMPACT,           // impact detected, confirming with gyroscope
+    STATE_FALL_DETECTED     // fall confirmed, fast LED blink + alert
+} FallState;
+
+/* Accelerometer thresholds (m/s^2) */
+#define FREEFALL_THRESHOLD      4.0f
+#define IMPACT_THRESHOLD        19.6f
+
+/* Gyroscope threshold (degrees per second) */
+#define GYRO_THRESHOLD          120.0f
+
+/* Barometer threshold (hPa) */
+#define PRESSURE_CHANGE_THRESHOLD  0.10f
+
+/* Debounce and timing */
+#define FREEFALL_DEBOUNCE_COUNT    2
+#define FREEFALL_TIMEOUT_MS        500
+#define FALL_ALERT_DURATION_MS     10000
+
+/* LED blink rates */
+#define BLINK_FAST_MS              100
+#define BLINK_SLOW_MS              1000
+
+/* Sensor sampling period */
+#define SAMPLE_PERIOD_MS           50
+
 
 int main(void)
 {
@@ -32,7 +68,7 @@ int main(void)
 
 	/* Reset of all peripherals, Initializes the Flash interface and the Systick. */
 	HAL_Init();
-
+	initialise_monitor_handles();
 	/* UART initialization  */
 	UART1_Init();
 
@@ -40,6 +76,7 @@ int main(void)
 	BSP_LED_Init(LED2);
 	BSP_ACCELERO_Init();
 	BSP_GYRO_Init();
+	BSP_PSENSOR_Init();
 
 	/*Set the initial LED state to off*/
 	BSP_LED_Off(LED2);
@@ -48,105 +85,213 @@ int main(void)
 	int accel_buff_y[4]={0};
 	int accel_buff_z[4]={0};
 	int i=0;
-	int delay_ms=1000; //change delay time to suit your code
+
+	/* Fall detection state variables */
+	FallState state = STATE_NORMAL;
+	int freefall_debounce     = 0;
+	uint32_t freefall_start   = 0;
+	uint32_t fall_alert_start = 0;
+	float pressure_baseline   = 0.0f;
+	int pressure_confirmed    = 0;
+
+	/* Non-blocking LED timing */
+	uint32_t last_led_toggle = 0;
+	int led_interval = BLINK_SLOW_MS;
+
+	/* Initial pressure reading */
+	float current_pressure = BSP_PSENSOR_ReadPressure();
+	pressure_baseline = current_pressure;
 
 	while (1)
 	{
+		uint32_t now = HAL_GetTick();
 
-		BSP_LED_Toggle(LED2);		// This function helps to toggle the current LED state
+		/* ---- Non-blocking LED control ---- */
+		if ((now - last_led_toggle) >= (uint32_t)led_interval)
+		{
+			BSP_LED_Toggle(LED2);
+			last_led_toggle = now;
+		}
 
-		int16_t accel_data_i16[3] = { 0 };			// array to store the x, y and z readings of accelerometer
-		/********Function call to read accelerometer values*********/
+		/* ---- Read accelerometer ---- */
+		int16_t accel_data_i16[3] = { 0 };
 		BSP_ACCELERO_AccGetXYZ(accel_data_i16);
 
-		//Copy the values over to a circular style buffer
-		accel_buff_x[i%4]=accel_data_i16[0]; //acceleration along X-Axis
-		accel_buff_y[i%4]=accel_data_i16[1]; //acceleration along Y-Axis
-		accel_buff_z[i%4]=accel_data_i16[2]; //acceleration along Z-Axis
+		accel_buff_x[i%4]=accel_data_i16[0];
+		accel_buff_y[i%4]=accel_data_i16[1];
+		accel_buff_z[i%4]=accel_data_i16[2];
 
-
-		// ********* Read gyroscope values *********/
+		/* ---- Read gyroscope ---- */
 		float gyro_data[3]={0.0};
 		float* ptr_gyro=gyro_data;
 		BSP_GYRO_GetXYZ(ptr_gyro);
 
-		//The output of gyro has been made to display in dps(degree per second)
 		float gyro_velocity[3]={0.0};
 		gyro_velocity[0]=(gyro_data[0]*9.8/(1000));
 		gyro_velocity[1]=(gyro_data[1]*9.8/(1000));
 		gyro_velocity[2]=(gyro_data[2]*9.8/(1000));
 
+		/* ---- Read barometer ---- */
+		current_pressure = BSP_PSENSOR_ReadPressure();
 
-		//Preprocessing the filtered outputs  The same needs to be done for the output from the C program as well
-		float accel_filt_asm[3]={0}; // final value of filtered acceleration values
-
+		/* ---- Filtered accelerometer (assembly) ---- */
+		float accel_filt_asm[3]={0};
 		accel_filt_asm[0]= (float)mov_avg(N,accel_buff_x) * (9.8/1000.0f);
 		accel_filt_asm[1]= (float)mov_avg(N,accel_buff_y) * (9.8/1000.0f);
 		accel_filt_asm[2]= (float)mov_avg(N,accel_buff_z) * (9.8/1000.0f);
 
-
-		//Preprocessing the filtered outputs  The same needs to be done for the output from the assembly program as well
+		/* ---- Filtered accelerometer (C reference) ---- */
 		float accel_filt_c[3]={0};
-
 		accel_filt_c[0]=(float)mov_avg_C(N,accel_buff_x) * (9.8/1000.0f);
 		accel_filt_c[1]=(float)mov_avg_C(N,accel_buff_y) * (9.8/1000.0f);
 		accel_filt_c[2]=(float)mov_avg_C(N,accel_buff_z) * (9.8/1000.0f);
 
-		/***************************UART transmission*******************************************/
-		char buffer[150]; // Create a buffer large enough to hold the text
+		/* ---- Compute magnitudes ---- */
+		float accel_mag = sqrtf(
+			accel_filt_asm[0] * accel_filt_asm[0] +
+			accel_filt_asm[1] * accel_filt_asm[1] +
+			accel_filt_asm[2] * accel_filt_asm[2]
+		);
 
-		/******Transmitting results of C execution over UART*********/
+		float gyro_mag = sqrtf(
+			gyro_velocity[0] * gyro_velocity[0] +
+			gyro_velocity[1] * gyro_velocity[1] +
+			gyro_velocity[2] * gyro_velocity[2]
+		);
+
+		/* ================================================================ */
+		/*                   STATE MACHINE FALL DETECTION                    */
+		/* ================================================================ */
+
+		switch (state)
+		{
+		case STATE_NORMAL:
+			led_interval = BLINK_SLOW_MS;
+
+			if (accel_mag < FREEFALL_THRESHOLD)
+			{
+				freefall_debounce++;
+				if (freefall_debounce >= FREEFALL_DEBOUNCE_COUNT)
+				{
+					state = STATE_FREEFALL;
+					freefall_start = now;
+					pressure_baseline = current_pressure;
+					pressure_confirmed = 0;
+				}
+			}
+			else
+			{
+				freefall_debounce = 0;
+			}
+			break;
+
+		case STATE_FREEFALL:
+			if ((now - freefall_start) > FREEFALL_TIMEOUT_MS)
+			{
+				state = STATE_NORMAL;
+				freefall_debounce = 0;
+				break;
+			}
+
+			if ((current_pressure - pressure_baseline) > PRESSURE_CHANGE_THRESHOLD)
+			{
+				pressure_confirmed = 1;
+			}
+
+			if (accel_mag > IMPACT_THRESHOLD)
+			{
+				state = STATE_IMPACT;
+			}
+			break;
+
+		case STATE_IMPACT:
+			if (gyro_mag > GYRO_THRESHOLD)
+			{
+				state = STATE_FALL_DETECTED;
+				fall_alert_start = now;
+			}
+			else if ((now - freefall_start) > FREEFALL_TIMEOUT_MS)
+			{
+				state = STATE_NORMAL;
+				freefall_debounce = 0;
+			}
+			break;
+
+		case STATE_FALL_DETECTED:
+			led_interval = BLINK_FAST_MS;
+
+			if ((now - fall_alert_start) > FALL_ALERT_DURATION_MS)
+			{
+				state = STATE_NORMAL;
+				freefall_debounce = 0;
+				pressure_confirmed = 0;
+			}
+			break;
+		}
+
+		/* ================================================================ */
+		/*                       UART TRANSMISSION                          */
+		/* ================================================================ */
+		char buffer[200];
+
 		if(i>=3)
 		{
-			// 1. First printf() Equivalent
-			sprintf(buffer, "Results of C execution for filtered accelerometer readings:\r\n");
+			// C filtered accelerometer
+			printf(buffer, "Results of C execution for filtered accelerometer readings:\r\n");
 			HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
 
-			// 2. Second printf() (with Floats) Equivalent
-			// Note: Requires -u _printf_float to be enabled in Linker settings
-			sprintf(buffer, "Averaged X : %f; Averaged Y : %f; Averaged Z : %f;\r\n",
+			printf(buffer, "Averaged X : %f; Averaged Y : %f; Averaged Z : %f;\r\n",
 					accel_filt_c[0], accel_filt_c[1], accel_filt_c[2]);
 			HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
 
-			/******Transmitting results of asm execution over UART*********/
-
-			// 1. First printf() Equivalent
-			sprintf(buffer, "Results of assembly execution for filtered accelerometer readings:\r\n");
+			// Assembly filtered accelerometer
+			printf(buffer, "Results of assembly execution for filtered accelerometer readings:\r\n");
 			HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
 
-			// 2. Second printf() (with Floats) Equivalent
-			// Note: Requires -u _printf_float to be enabled in Linker settings
-			sprintf(buffer, "Averaged X : %f; Averaged Y : %f; Averaged Z : %f;\r\n",
+			printf(buffer, "Averaged X : %f; Averaged Y : %f; Averaged Z : %f;\r\n",
 					accel_filt_asm[0], accel_filt_asm[1], accel_filt_asm[2]);
 			HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
 
-			/******Transmitting Gyroscope readings over UART*********/
-
-			// 1. First printf() Equivalent
-			sprintf(buffer, "Gyroscope sensor readings:\r\n");
+			// Gyroscope
+			printf(buffer, "Gyroscope sensor readings:\r\n");
 			HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
 
-			// 2. Second printf() (with Floats) Equivalent
-			// Note: Requires -u _printf_float to be enabled in Linker settings
-			sprintf(buffer, "Averaged X : %f; Averaged Y : %f; Averaged Z : %f;\r\n\n",
+			printf(buffer, "Gyro X : %f; Gyro Y : %f; Gyro Z : %f;\r\n",
 					gyro_velocity[0], gyro_velocity[1], gyro_velocity[2]);
+			HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+
+			// Barometer
+			printf(buffer, "Pressure : %f hPa\r\n", current_pressure);
+			HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+
+			// Detection status
+			printf(buffer, "Accel Mag: %f m/s^2 | Gyro Mag: %f dps | State: %d",
+					accel_mag, gyro_mag, (int)state);
+			HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+
+			if (state == STATE_FALL_DETECTED)
+			{
+				printf(buffer, " | *** FALL DETECTED! ***");
+				HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+
+				if (pressure_confirmed)
+				{
+					printf(buffer, " [Barometer confirmed]");
+					HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+				}
+			}
+
+			printf(buffer, "\r\n\n");
 			HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
 		}
 
-		HAL_Delay(delay_ms);	// 1 second delay
-
 		i++;
 
-		// ********* Fall detection *********/
-		// write your program from here:
-
-
+		HAL_Delay(SAMPLE_PERIOD_MS);
 	}
 
 
 }
-
-
 
 int mov_avg_C(int N, int* accel_buff)
 { 	// The implementation below is inefficient and meant only for verifying your results.
@@ -197,8 +342,8 @@ static void UART1_Init(void)
 // Do not modify these lines of code. They are written to supress UART related warnings
 int _read(int file, char *ptr, int len) { return 0; }
 int _fstat(int file, struct stat *st) { return 0; }
-int _lseek(int file, int ptr, int dir) { return 0; }
-int _isatty(int file) { return 1; }
-int _close(int file) { return -1; }
+//int _lseek(int file, int ptr, int dir) { return 0; }
+//int _isatty(int file) { return 1; }
+//int _close(int file) { return -1; }
 int _getpid(void) { return 1; }
-int _kill(int pid, int sig) { return -1; }
+//int _kill(int pid, int sig) { return -1; }
